@@ -1,0 +1,49 @@
+project:
+  name: deepfake-detection
+  seed: 42
+
+data:
+  manifest: data/manifest.csv
+  num_workers: 4
+  batch_size: 8
+  image_size: 224
+  clip_len: 16
+  sample_rate: 16000
+  n_mels: 80
+  hop_length: 160
+  win_length: 400
+  max_audio_seconds: 4
+  use_face_crop: true
+
+model:
+  visual:
+    name: vit_b_16
+    pretrained: true
+    frozen: false
+    out_dim: 768
+  audio:
+    in_channels: 1
+    out_dim: 256
+  attention:
+    embed_dim: 256
+    num_heads: 8
+    dropout: 0.1
+  fusion:
+    hidden_dim: 512
+    dropout: 0.2
+
+train:
+  epochs: 10
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  log_interval: 20
+  eval_interval: 1
+
+loss:
+  bce_weight: 1.0
+  lse_weight: 0.5
+  lse_margin: 1.0
+
+eval:
+  threshold: 0.5
