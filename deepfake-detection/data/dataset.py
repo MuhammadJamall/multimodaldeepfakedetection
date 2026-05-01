@@ -27,8 +27,10 @@ from pathlib import Path
 # Support running both as `python data/dataset.py` and as `from data.dataset import ...`
 try:
     from data.dummy_dataset import generate_dummy_batch
+    from data.augmentation import apply_augmentation
 except ImportError:
     from dummy_dataset import generate_dummy_batch
+    from augmentation import apply_augmentation
 
 
 class BasicDataset(Dataset):
@@ -56,6 +58,7 @@ class BasicDataset(Dataset):
         hdf5_path: Optional[Path] = None,
         device: str = "cpu",
         split: str = "train",
+        augmentation_cfg: Optional[Dict] = None,
     ):
         """
         Initialize the dataset.
@@ -79,6 +82,8 @@ class BasicDataset(Dataset):
         self.device = device
         self.split = split
         self.hdf5_path: Optional[Path] = None
+        self.augmentation_cfg = augmentation_cfg or {}
+        self.is_training = (split == "train")
 
         if use_dummy_data:
             self.data = None
@@ -137,11 +142,9 @@ class BasicDataset(Dataset):
         if self.use_dummy_data:
             # Generate a single dummy sample
             batch = generate_dummy_batch(batch_size=1, seed=idx)
-            return {
-                'frames': batch['frames'][0].to(self.device),
-                'mel':    batch['mel'][0].to(self.device),
-                'label':  batch['labels'][0].float().unsqueeze(0).to(self.device),  # (1,) float for BCE
-            }
+            frames = batch['frames'][0]
+            mel    = batch['mel'][0]
+            label  = batch['labels'][0].float().unsqueeze(0)
         else:
             # Load from HDF5
             # Expected HDF5 structure:
@@ -155,11 +158,18 @@ class BasicDataset(Dataset):
                 mel    = torch.from_numpy(f[self.split]['mel'][idx]).float()
                 label  = torch.tensor(f[self.split]['labels'][idx]).float().unsqueeze(0)
 
-                return {
-                    'frames': frames.to(self.device),
-                    'mel':    mel.to(self.device),
-                    'label':  label.to(self.device),
-                }
+        # Apply augmentation (training only, 30% per-video probability)
+        frames, mel = apply_augmentation(
+            frames, mel,
+            cfg=self.augmentation_cfg,
+            is_training=self.is_training,
+        )
+
+        return {
+            'frames': frames.to(self.device),
+            'mel':    mel.to(self.device),
+            'label':  label.to(self.device),
+        }
 
     def get_balanced_sampler(self) -> WeightedRandomSampler:
         """
@@ -270,6 +280,10 @@ def build_dataloaders(cfg: dict) -> Tuple[DataLoader, DataLoader]:
     hdf5_path   = dcfg.get("hdf5_path", None)
     batch_size  = tcfg.get("batch_size", 32)
     num_workers = dcfg.get("num_workers", 4)
+    aug_cfg = cfg.get("augmentation", {})
+    # Also pass compression_augmentation_prob from data section
+    aug_cfg.setdefault("compression_augmentation_prob",
+                       dcfg.get("compression_augmentation_prob", 0.3))
 
     # ── Train loader ──────────────────────────────────────────────────────────
     train_dataset = BasicDataset(
@@ -278,6 +292,7 @@ def build_dataloaders(cfg: dict) -> Tuple[DataLoader, DataLoader]:
         use_dummy_data=use_dummy,
         hdf5_path=hdf5_path,
         split="train",
+        augmentation_cfg=aug_cfg,
     )
 
     train_sampler = train_dataset.get_balanced_sampler()

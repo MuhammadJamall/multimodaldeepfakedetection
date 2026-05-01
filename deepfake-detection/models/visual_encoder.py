@@ -82,6 +82,9 @@ class VisualEncoder(nn.Module):
 
         self.vit.embeddings.patch_embeddings.projection = new_proj
 
+        # Update config so ViT's internal channel validation accepts 6 channels
+        self.vit.config.num_channels = 6
+
         # ── 3. Linear projection 768 → 512 ───────────────────────────────────
         self.proj = nn.Linear(self.VIT_HIDDEN_DIM, out_dim)
 
