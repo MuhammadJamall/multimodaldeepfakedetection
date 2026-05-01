@@ -174,7 +174,10 @@ def val_epoch(
     all_probs  = np.concatenate(all_probs,  axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
 
-    auroc = roc_auc_score(all_labels, all_probs)
+    try:
+        auroc = roc_auc_score(all_labels, all_probs)
+    except ValueError:
+        auroc = float("nan")
     acc   = ((all_probs >= 0.5).astype(float) == all_labels).mean()
 
     return {
