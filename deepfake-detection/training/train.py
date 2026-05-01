@@ -236,6 +236,7 @@ def train(cfg: dict):
     param_groups = model.get_param_groups(
         lr_backbone = tcfg["learning_rate_vit"],
         lr_fusion   = tcfg["learning_rate_fusion"],
+        lr_audio    = tcfg.get("learning_rate_audio", tcfg["learning_rate_vit"]),
     )
     optimizer = optim.AdamW(
         param_groups,

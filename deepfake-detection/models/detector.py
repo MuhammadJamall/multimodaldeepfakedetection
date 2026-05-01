@@ -124,6 +124,7 @@ class DeepfakeDetector(nn.Module):
         self,
         lr_backbone: float = 1e-4,
         lr_fusion:   float = 1e-3,
+        lr_audio:    float | None = None,
     ) -> list[dict]:
         """
         Returns AdamW parameter groups with differential learning rates.
@@ -131,6 +132,7 @@ class DeepfakeDetector(nn.Module):
         Usage:
             optimizer = AdamW(model.get_param_groups(), weight_decay=1e-2)
         """
+        audio_lr = lr_audio if lr_audio is not None else lr_backbone
         return [
             # ViT backbone
             {
@@ -152,7 +154,7 @@ class DeepfakeDetector(nn.Module):
                           list(self.audio_encoder.conv4.parameters()) +
                           list(self.audio_encoder.conv5.parameters()) +
                           list(self.audio_encoder.conv6.parameters()),
-                "lr": lr_backbone,
+                "lr": audio_lr,
                 "name": "audio_backbone",
             },
             # CNN projection head
