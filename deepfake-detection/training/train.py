@@ -1,235 +1,335 @@
-from __future__ import annotations
+"""
+train.py
+--------
+Main training script for DeepfakeDetector.
 
-import argparse
-import json
-import random
+Implements:
+  - Phase 1 (Epochs 1–5)  : backbone frozen, fusion+head trained
+  - Phase 2 (Epochs 6–30) : full end-to-end fine-tuning
+  - AdamW with differential LR + gradient clipping
+  - Linear warmup → cosine annealing
+  - BCE + LSE-D combined loss
+  - Validation after every epoch (AUROC-based best checkpoint saving)
+  - Weights & Biases logging
+
+Usage:
+    python training/train.py --config configs/default.yaml
+"""
+
+import os
 import sys
-from pathlib import Path
-from typing import Any, Dict, List
-
-import numpy as np
-import torch
+import argparse
 import yaml
+import time
+
+import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
+try:
+    import wandb  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    class _WandbStub:
+        def init(self, *args, **kwargs):
+            return None
 
-from data.dataset import DeepfakeDataset
-from evaluation.evaluate import evaluate_model
-from models.detector import DeepfakeDetector
-from training.losses import combined_loss
+        def log(self, *args, **kwargs):
+            return None
+
+        def finish(self, *args, **kwargs):
+            return None
+
+    wandb = _WandbStub()
+from sklearn.metrics import roc_auc_score
+import numpy as np
+
+# Make sure project root is on path when running as a script
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.detector   import DeepfakeDetector
+from training.losses   import DeepfakeLoss
 from training.scheduler import build_scheduler
 
 
-def set_seed(seed: int) -> None:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def set_seed(seed: int = 42):
+    import random
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+
+
+def load_config(path: str) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def get_device() -> torch.device:
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        dev = torch.device("cuda")
+        print(f"[Device] GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        dev = torch.device("cpu")
+        print("[Device] CPU (no GPU found — training will be slow)")
+    return dev
 
 
-def parse_value(raw: str):
-    lowered = raw.lower()
-    if lowered in {"true", "false"}:
-        return lowered == "true"
-    try:
-        if "." in raw:
-            return float(raw)
-        return int(raw)
-    except ValueError:
-        return raw
+# ── Epoch runners ─────────────────────────────────────────────────────────────
 
-
-def apply_overrides(cfg: Dict[str, Any], overrides: List[str]) -> None:
-    for item in overrides:
-        if "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        parts = key.split(".")
-        target = cfg
-        for part in parts[:-1]:
-            if part not in target or not isinstance(target[part], dict):
-                target[part] = {}
-            target = target[part]
-        target[parts[-1]] = parse_value(value)
-
-
-def build_model(cfg: Dict[str, Any]) -> DeepfakeDetector:
-    visual_cfg = cfg["model"]["visual"]
-    audio_cfg = cfg["model"]["audio"]
-    attention_cfg = cfg["model"]["attention"]
-    fusion_cfg = cfg["model"]["fusion"]
-
-    return DeepfakeDetector(
-        visual_name=visual_cfg["name"],
-        visual_pretrained=visual_cfg["pretrained"],
-        visual_frozen=visual_cfg["frozen"],
-        audio_in_channels=audio_cfg["in_channels"],
-        audio_out_dim=audio_cfg["out_dim"],
-        attention_embed_dim=attention_cfg["embed_dim"],
-        attention_heads=attention_cfg["num_heads"],
-        attention_dropout=attention_cfg["dropout"],
-        fusion_hidden_dim=fusion_cfg["hidden_dim"],
-        fusion_dropout=fusion_cfg["dropout"],
-    )
-
-
-def build_dataloaders(cfg: Dict[str, Any], device: str):
-    data_cfg = cfg["data"]
-
-    train_dataset = DeepfakeDataset(
-        data_cfg["manifest"],
-        split="train",
-        image_size=data_cfg["image_size"],
-        clip_len=data_cfg["clip_len"],
-        sample_rate=data_cfg["sample_rate"],
-        n_mels=data_cfg["n_mels"],
-        hop_length=data_cfg["hop_length"],
-        win_length=data_cfg["win_length"],
-        max_audio_seconds=data_cfg["max_audio_seconds"],
-        use_face_crop=data_cfg["use_face_crop"],
-        device=device,
-    )
-
-    val_dataset = DeepfakeDataset(
-        data_cfg["manifest"],
-        split="val",
-        image_size=data_cfg["image_size"],
-        clip_len=data_cfg["clip_len"],
-        sample_rate=data_cfg["sample_rate"],
-        n_mels=data_cfg["n_mels"],
-        hop_length=data_cfg["hop_length"],
-        win_length=data_cfg["win_length"],
-        max_audio_seconds=data_cfg["max_audio_seconds"],
-        use_face_crop=data_cfg["use_face_crop"],
-        device=device,
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=data_cfg["batch_size"],
-        shuffle=True,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=data_cfg["batch_size"],
-        shuffle=False,
-        num_workers=data_cfg["num_workers"],
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    return train_loader, val_loader
-
-
-def train_one_epoch(
-    model: torch.nn.Module,
-    loader: DataLoader,
+def train_epoch(
+    model:     DeepfakeDetector,
+    loader:    DataLoader,
     optimizer: torch.optim.Optimizer,
-    device: str,
-    loss_cfg: Dict[str, Any],
+    criterion: DeepfakeLoss,
+    device:    torch.device,
     grad_clip: float,
-) -> float:
+    epoch:     int,
+) -> dict:
+    """
+    Run one training epoch.
+
+    Returns dict of averaged losses for W&B logging.
+    """
     model.train()
-    running_loss = 0.0
+    # CRITICAL: if backbones are frozen, keep them in eval() mode
+    # to avoid corrupting BatchNorm running statistics.
+    if epoch <= 5:
+        model.visual_encoder.vit.eval()
+        for m in [model.audio_encoder.conv1, model.audio_encoder.conv2,
+                  model.audio_encoder.conv3, model.audio_encoder.conv4,
+                  model.audio_encoder.conv5, model.audio_encoder.conv6]:
+            m.eval()
 
-    for batch in tqdm(loader, desc="train", leave=False):
-        video = batch["video"].to(device)
-        audio = batch["audio"].to(device)
-        labels = batch["label"].to(device)
+    total_loss = bce_loss = lsed_loss = 0.0
+    n_batches  = 0
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(video, audio)
-        loss = combined_loss(
-            logits,
-            labels,
-            bce_weight=loss_cfg["bce_weight"],
-            lse_weight=loss_cfg["lse_weight"],
-            lse_margin=loss_cfg["lse_margin"],
-        )
-        loss.backward()
+    for batch in loader:
+        frames = batch["frames"].to(device)   # (B, T, 6, 224, 224)
+        mel    = batch["mel"].to(device)      # (B, T, 80, F)
+        labels = batch["label"].to(device)    # (B, 1) float
 
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.zero_grad()
+
+        prob, embeddings = model(frames, mel, return_embeddings=True)
+        losses = criterion(prob, embeddings["v"], embeddings["a"], labels)
+
+        losses["total"].backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
 
         optimizer.step()
-        running_loss += loss.item()
 
-    return running_loss / max(len(loader), 1)
+        total_loss += losses["total"].item()
+        bce_loss   += losses["bce"].item()
+        lsed_loss  += losses["lsed"].item()
+        n_batches  += 1
+
+    return {
+        "train/loss_total": total_loss / n_batches,
+        "train/loss_bce":   bce_loss   / n_batches,
+        "train/loss_lsed":  lsed_loss  / n_batches,
+    }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Deepfake detection training")
-    parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--output-dir", default="runs/exp")
-    parser.add_argument("--override", action="append", default=[])
-    args = parser.parse_args()
+@torch.no_grad()
+def val_epoch(
+    model:     DeepfakeDetector,
+    loader:    DataLoader,
+    criterion: DeepfakeLoss,
+    device:    torch.device,
+) -> dict:
+    """
+    Run one validation epoch.
 
-    with open(args.config, "r") as handle:
-        cfg = yaml.safe_load(handle)
+    Returns dict of losses + AUROC for checkpoint logic and W&B logging.
+    """
+    model.eval()
 
-    if args.override:
-        apply_overrides(cfg, args.override)
+    total_loss = bce_loss = lsed_loss = 0.0
+    n_batches  = 0
 
-    device = args.device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    all_probs  = []
+    all_labels = []
 
-    set_seed(cfg["project"]["seed"])
+    for batch in loader:
+        frames = batch["frames"].to(device)
+        mel    = batch["mel"].to(device)
+        labels = batch["label"].to(device)
 
-    train_loader, val_loader = build_dataloaders(cfg, device)
-    model = build_model(cfg).to(device)
+        prob, embeddings = model(frames, mel, return_embeddings=True)
+        losses = criterion(prob, embeddings["v"], embeddings["a"], labels)
 
-    train_cfg = cfg["train"]
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_cfg["lr"],
-        weight_decay=train_cfg["weight_decay"],
+        total_loss += losses["total"].item()
+        bce_loss   += losses["bce"].item()
+        lsed_loss  += losses["lsed"].item()
+        n_batches  += 1
+
+        all_probs.append(prob.cpu().numpy())
+        all_labels.append(labels.cpu().numpy())
+
+    all_probs  = np.concatenate(all_probs,  axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    auroc = roc_auc_score(all_labels, all_probs)
+    acc   = ((all_probs >= 0.5).astype(float) == all_labels).mean()
+
+    return {
+        "val/loss_total": total_loss / n_batches,
+        "val/loss_bce":   bce_loss   / n_batches,
+        "val/loss_lsed":  lsed_loss  / n_batches,
+        "val/auroc":      auroc,
+        "val/accuracy":   acc,
+    }
+
+
+# ── Checkpoint utils ──────────────────────────────────────────────────────────
+
+def save_checkpoint(model, optimizer, scheduler, epoch, metrics, cfg, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({
+        "epoch":     epoch,
+        "model":     model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "metrics":   metrics,
+        "config":    cfg,
+    }, path)
+    print(f"  [Checkpoint] Saved → {path}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def train(cfg: dict):
+    set_seed(cfg.get("seed", 42))
+    device = get_device()
+
+    # ── W&B init ───────────────────────────────────────────────────────────
+    log_cfg = cfg.get("logging", {})
+    wandb.init(
+        project=log_cfg.get("wandb_project", "deepfake-detection"),
+        config=cfg,
+        name=cfg.get("run_name", f"run_{int(time.time())}"),
     )
-    scheduler = build_scheduler(optimizer, train_cfg["epochs"])
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # ── Model ──────────────────────────────────────────────────────────────
+    mcfg = cfg["model"]
+    model = DeepfakeDetector(
+        vit_model        = mcfg["vit_model"],
+        vit_hidden_dim   = mcfg["vit_hidden_dim"],
+        audio_hidden_dim = mcfg["audio_hidden_dim"],
+        num_heads        = mcfg["num_heads"],
+        ffn_hidden_dim   = mcfg["ffn_hidden_dim"],
+        dropout          = mcfg["dropout"],
+    ).to(device)
 
-    with (output_dir / "config.yaml").open("w") as handle:
-        yaml.safe_dump(cfg, handle)
+    model.set_warmup_mode()   # Phase 1: freeze backbones
 
-    metrics_path = output_dir / "metrics.jsonl"
+    # ── Optimizer ──────────────────────────────────────────────────────────
+    tcfg = cfg["training"]
+    param_groups = model.get_param_groups(
+        lr_backbone = tcfg["learning_rate_vit"],
+        lr_fusion   = tcfg["learning_rate_fusion"],
+    )
+    optimizer = optim.AdamW(
+        param_groups,
+        betas        = (0.9, 0.999),
+        weight_decay = tcfg["weight_decay"],
+    )
 
-    for epoch in range(1, train_cfg["epochs"] + 1):
-        loss = train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            device,
-            cfg["loss"],
-            train_cfg["grad_clip"],
+    # ── Scheduler ──────────────────────────────────────────────────────────
+    scheduler = build_scheduler(
+        optimizer,
+        warmup_epochs = tcfg["warmup_epochs"],
+        total_epochs  = tcfg["epochs"],
+    )
+
+    # ── Loss ───────────────────────────────────────────────────────────────
+    lcfg = cfg.get("loss", {})
+    criterion = DeepfakeLoss(
+        lse_d_lambda = lcfg.get("lse_d_lambda", 0.3),
+        lse_d_margin = lcfg.get("lse_d_margin", 1.0),
+    )
+
+    # ── Data loaders ───────────────────────────────────────────────────────
+    # NOTE: Replace these with real Dataset classes once data is available.
+    # For now we use a stub that returns random tensors of the correct shape,
+    # so the training loop can be smoke-tested end-to-end.
+    from data.dataset import build_dataloaders   # noqa — imported lazily
+
+    train_loader, val_loader = build_dataloaders(cfg)
+
+    # ── Training loop ──────────────────────────────────────────────────────
+    best_auroc   = 0.0
+    ckpt_dir     = cfg.get("checkpoint_dir", "checkpoints")
+
+    for epoch in range(1, tcfg["epochs"] + 1):
+        t0 = time.time()
+
+        # ── Phase transition ───────────────────────────────────────────────
+        if epoch == tcfg["warmup_epochs"] + 1:
+            model.set_finetune_mode()
+            print(f"[Epoch {epoch}] Switched to fine-tune mode.")
+
+        # ── Train + validate ───────────────────────────────────────────────
+        train_metrics = train_epoch(
+            model, train_loader, optimizer, criterion,
+            device, tcfg["gradient_clip"], epoch,
         )
+        val_metrics = val_epoch(model, val_loader, criterion, device)
+
         scheduler.step()
 
-        if epoch % train_cfg["eval_interval"] == 0:
-            metrics = evaluate_model(
-                model,
-                val_loader,
-                device=device,
-                threshold=cfg["eval"]["threshold"],
+        # ── Logging ────────────────────────────────────────────────────────
+        epoch_time = time.time() - t0
+        log_dict   = {**train_metrics, **val_metrics,
+                      "epoch": epoch,
+                      "epoch_time_s": epoch_time,
+                      "lr/backbone": optimizer.param_groups[0]["lr"],
+                      "lr/fusion":   optimizer.param_groups[-1]["lr"]}
+        wandb.log(log_dict)
+
+        auroc = val_metrics["val/auroc"]
+        acc   = val_metrics["val/accuracy"]
+        print(
+            f"Epoch {epoch:3d}/{tcfg['epochs']} │ "
+            f"loss {train_metrics['train/loss_total']:.4f} │ "
+            f"val_auroc {auroc:.4f} │ "
+            f"val_acc {acc:.4f} │ "
+            f"{epoch_time:.1f}s"
+        )
+
+        # ── Checkpoint: save best AUROC model ──────────────────────────────
+        if auroc > best_auroc:
+            best_auroc = auroc
+            save_checkpoint(
+                model, optimizer, scheduler, epoch,
+                val_metrics, cfg,
+                path=os.path.join(ckpt_dir, "best_auroc.pt"),
             )
-            metrics["epoch"] = epoch
-            metrics["train_loss"] = loss
-            with metrics_path.open("a") as handle:
-                handle.write(json.dumps(metrics) + "\n")
 
-        torch.save(model.state_dict(), output_dir / "last.pt")
+        # ── Checkpoint: save latest (for resuming) ─────────────────────────
+        save_checkpoint(
+            model, optimizer, scheduler, epoch,
+            val_metrics, cfg,
+            path=os.path.join(ckpt_dir, "latest.pt"),
+        )
 
-    print(f"Training complete. Outputs saved to {output_dir}")
+    print(f"\nTraining complete. Best val AUROC: {best_auroc:.4f}")
+    wandb.finish()
 
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train DeepfakeDetector")
+    parser.add_argument("--config", type=str,
+                        default="configs/default.yaml",
+                        help="Path to YAML config file")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    train(cfg)

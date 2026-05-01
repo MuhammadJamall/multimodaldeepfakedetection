@@ -42,21 +42,27 @@ def compute_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float = 0
 def evaluate_model(
     model: torch.nn.Module, loader: DataLoader, device: str, threshold: float = 0.5
 ) -> Dict[str, float]:
+    """
+    Evaluate model on a DataLoader.
+
+    Expects batch dict with keys: 'frames', 'mel', 'label'.
+    Model returns sigmoid probability directly (no extra sigmoid needed).
+    """
     model.eval()
     all_scores: List[float] = []
     all_labels: List[float] = []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="eval", leave=False):
-            video = batch["video"].to(device)
-            audio = batch["audio"].to(device)
+            frames = batch["frames"].to(device)
+            mel    = batch["mel"].to(device)
             labels = batch["label"].to(device)
 
-            logits = model(video, audio)
-            scores = torch.sigmoid(logits)
+            # Model output is already sigmoid probability (B, 1)
+            prob = model(frames, mel)
 
-            all_scores.extend(scores.cpu().numpy().tolist())
-            all_labels.extend(labels.cpu().numpy().tolist())
+            all_scores.extend(prob.cpu().numpy().flatten().tolist())
+            all_labels.extend(labels.cpu().numpy().flatten().tolist())
 
     labels_np = np.asarray(all_labels, dtype=np.float32)
     scores_np = np.asarray(all_scores, dtype=np.float32)

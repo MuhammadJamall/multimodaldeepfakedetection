@@ -1,49 +1,83 @@
-project:
-  name: deepfake-detection
-  seed: 42
+# ============================================================================
+# MULTIMODAL DEEPFAKE DETECTION - TDD CONFIGURATION
+# ============================================================================
 
-data:
-  manifest: data/manifest.csv
-  num_workers: 4
-  batch_size: 8
-  image_size: 224
-  clip_len: 16
-  sample_rate: 16000
-  n_mels: 80
-  hop_length: 160
-  win_length: 400
-  max_audio_seconds: 4
-  use_face_crop: true
-
+# Model Architecture Hyperparameters
 model:
-  visual:
-    name: vit_b_16
-    pretrained: true
-    frozen: false
-    out_dim: 768
-  audio:
-    in_channels: 1
-    out_dim: 256
-  attention:
-    embed_dim: 256
-    num_heads: 8
-    dropout: 0.1
-  fusion:
-    hidden_dim: 512
-    dropout: 0.2
+  vit_model: "google/vit-base-patch16-224-in21k"
+  vit_hidden_dim: 512
+  vit_pretrained: true
+  audio_hidden_dim: 512
+  num_frames: 16
+  num_heads: 8
+  head_dim: 64
+  ffn_hidden_dim: 256
+  dropout: 0.3
+  activation: "relu"
 
-train:
-  epochs: 10
-  lr: 1.0e-4
-  weight_decay: 1.0e-4
-  grad_clip: 1.0
-  log_interval: 20
-  eval_interval: 1
-
+# Training Hyperparameters
+training:
+  epochs: 30
+  batch_size: 32
+  learning_rate_vit: 1e-4
+  learning_rate_audio: 1e-4
+  learning_rate_fusion: 1e-3
+  warmup_epochs: 5
+  weight_decay: 1e-2
+  gradient_clip: 1.0
+  gradient_clip_norm: true
+  
+# Loss Function Parameters
 loss:
-  bce_weight: 1.0
-  lse_weight: 0.5
-  lse_margin: 1.0
+  lse_d_lambda: 0.3
+  lse_d_margin: 1.0
+  bce_reduction: "mean"
 
-eval:
-  threshold: 0.5
+# Data Pipeline
+data:
+  mel_bins: 80
+  sample_rate: 16000
+  window_ms: 25
+  hop_ms: 10
+  compression_augmentation_prob: 0.3
+  train_split: 14000
+  val_split: 3000
+  test_split: 3000
+  num_workers: 4
+  pin_memory: true
+  # Toggle for dummy vs real data — set to false when HDF5 data is available
+  use_dummy_data: true
+  # Path to preprocessed HDF5 file (required when use_dummy_data is false)
+  # hdf5_path: "./data/preprocessed/fakeavceleb.h5"
+
+# Augmentation Settings
+augmentation:
+  jpeg_quality_range: [40, 80]
+  h264_crf_range: [23, 35]
+  blur_sigma_range: [0.5, 2.0]
+  frame_drop_prob: 0.2
+  audio_noise_std: 0.01
+
+# Checkpoint and Logging
+checkpoint:
+  save_best_only: true
+  monitor_metric: "val_auroc"
+  mode: "max"
+  save_top_k: 3
+
+logging:
+  use_wandb: true
+  wandb_project: "deepfake-detection"
+  log_frequency: 100
+  save_frequency: 1000
+
+# Device and Reproducibility
+device: "cuda"
+seed: 42
+deterministic: true
+
+# Paths (relative to project root)
+paths:
+  data_root: "./data"
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
