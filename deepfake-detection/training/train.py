@@ -171,8 +171,8 @@ def val_epoch(
         all_probs.append(prob.cpu().numpy())
         all_labels.append(labels.cpu().numpy())
 
-    all_probs  = np.concatenate(all_probs,  axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
+    all_probs  = np.concatenate(all_probs,  axis=0).ravel()
+    all_labels = np.concatenate(all_labels, axis=0).ravel()
 
     try:
         auroc = roc_auc_score(all_labels, all_probs)

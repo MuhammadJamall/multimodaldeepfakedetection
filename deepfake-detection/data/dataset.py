@@ -24,13 +24,38 @@ except ModuleNotFoundError:  # pragma: no cover - handled at runtime when needed
 import numpy as np
 from pathlib import Path
 
-# Support running both as `python data/dataset.py` and as `from data.dataset import ...`
-try:
-    from data.dummy_dataset import generate_dummy_batch
-    from data.augmentation import apply_augmentation
-except ImportError:
-    from dummy_dataset import generate_dummy_batch
-    from augmentation import apply_augmentation
+# Lazy imports for dummy_dataset and augmentation — these may not resolve
+# on all platforms (e.g. Colab) due to path differences.  We defer the
+# ImportError until the function is actually *called*, which avoids
+# crashing at import time when using real HDF5 data.
+
+generate_dummy_batch = None
+apply_augmentation = None
+
+def _ensure_dummy_dataset():
+    global generate_dummy_batch
+    if generate_dummy_batch is not None:
+        return
+    try:
+        from data.dummy_dataset import generate_dummy_batch as _fn
+    except ImportError:
+        from dummy_dataset import generate_dummy_batch as _fn
+    generate_dummy_batch = _fn
+
+def _ensure_augmentation():
+    global apply_augmentation
+    if apply_augmentation is not None:
+        return
+    try:
+        from data.augmentation import apply_augmentation as _fn
+    except ImportError:
+        try:
+            from augmentation import apply_augmentation as _fn
+        except ImportError:
+            # Fallback: no augmentation available, return inputs unchanged
+            def _fn(frames, mel, cfg=None, is_training=True):
+                return frames, mel
+    apply_augmentation = _fn
 
 
 class BasicDataset(Dataset):
@@ -141,6 +166,7 @@ class BasicDataset(Dataset):
 
         if self.use_dummy_data:
             # Generate a single dummy sample
+            _ensure_dummy_dataset()
             batch = generate_dummy_batch(batch_size=1, seed=idx)
             frames = batch['frames'][0]
             mel    = batch['mel'][0]
@@ -159,6 +185,7 @@ class BasicDataset(Dataset):
                 label  = torch.tensor(f[self.split]['labels'][idx]).float().unsqueeze(0)
 
         # Apply augmentation (training only, 30% per-video probability)
+        _ensure_augmentation()
         frames, mel = apply_augmentation(
             frames, mel,
             cfg=self.augmentation_cfg,
@@ -185,6 +212,7 @@ class BasicDataset(Dataset):
         if self.use_dummy_data:
             # Generate all labels for sampling weights
             all_labels = []
+            _ensure_dummy_dataset()
             for i in range(self.num_samples):
                 batch = generate_dummy_batch(batch_size=1, seed=i)
                 all_labels.append(batch['labels'][0].item())
