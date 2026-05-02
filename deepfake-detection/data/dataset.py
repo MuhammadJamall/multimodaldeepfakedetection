@@ -296,13 +296,16 @@ def build_dataloaders(cfg: dict) -> Tuple[DataLoader, DataLoader]:
     )
 
     train_sampler = train_dataset.get_balanced_sampler()
-    train_loader = DataLoader(
-        train_dataset,
+    train_loader_kw: Dict = dict(
         batch_size=batch_size,
         sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=dcfg.get("pin_memory", True),
     )
+    if num_workers > 0 and dcfg.get("persistent_workers", False):
+        train_loader_kw["persistent_workers"] = True
+
+    train_loader = DataLoader(train_dataset, **train_loader_kw)
 
     # ── Val loader ────────────────────────────────────────────────────────────
     val_dataset = BasicDataset(
@@ -313,13 +316,16 @@ def build_dataloaders(cfg: dict) -> Tuple[DataLoader, DataLoader]:
         split="val",
     )
 
-    val_loader = DataLoader(
-        val_dataset,
+    val_loader_kw: Dict = dict(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=dcfg.get("pin_memory", True),
     )
+    if num_workers > 0 and dcfg.get("persistent_workers", False):
+        val_loader_kw["persistent_workers"] = True
+
+    val_loader = DataLoader(val_dataset, **val_loader_kw)
 
     print(f"[DataLoaders] Train: {len(train_dataset)} samples, "
           f"Val: {len(val_dataset)} samples, "

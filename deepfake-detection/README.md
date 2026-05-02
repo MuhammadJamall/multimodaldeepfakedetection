@@ -30,24 +30,10 @@ Video Frames (B, 16, 6, 224, 224)     Mel Spectrogram (B, 16, 80, F)
 ### 1. Environment Setup
 
 ```bash
-# Option A: Docker (recommended)
-docker build -t deepfake-detector .
-docker run --gpus all -v /path/to/data:/data -it deepfake-detector
-
-# Option B: Local
 pip install -r requirements.txt
 ```
 
-### 2. Verify Installation (Smoke Test)
-
-```bash
-python scripts/smoke_test.py
-```
-
-This runs 2 epochs with dummy data to verify the entire pipeline:
-data → model → loss → optimizer → checkpoint → evaluation.
-
-### 3. Preprocess FakeAVCeleb Dataset
+### 2. Preprocess FakeAVCeleb Dataset
 
 ```bash
 python scripts/preprocess_to_hdf5.py \
@@ -69,7 +55,7 @@ FakeAVCeleb/
     └── .../
 ```
 
-### 4. Configure for Real Data
+### 3. Configure for Real Data
 
 Edit `configs/default.yaml`:
 
@@ -79,7 +65,7 @@ data:
   hdf5_path: "./data/preprocessed/fakeavceleb.h5"
 ```
 
-### 5. Train
+### 4. Train
 
 ```bash
 python training/train.py --config configs/default.yaml
@@ -91,7 +77,7 @@ Training runs for 30 epochs with:
 - Checkpoints saved to `checkpoints/` (best AUROC + latest)
 - Metrics logged to Weights & Biases
 
-### 6. Evaluate
+### 5. Evaluate
 
 ```bash
 # In-distribution evaluation
@@ -130,18 +116,9 @@ deepfake-detection/
 │   ├── evaluate.py               # AUROC, EER, accuracy computation
 │   └── interpretability.py       # Cross-attention heatmap extraction
 ├── scripts/
-│   ├── smoke_test.py             # End-to-end pipeline verification
 │   ├── preprocess_to_hdf5.py     # FakeAVCeleb → HDF5 offline processing
-│   ├── run_evaluation.py         # Standalone evaluation with reporting
-│   ├── run_ablation.sh           # Ablation experiments
-│   └── download_data.sh          # Data download helper
-├── tests/
-│   └── test1.py                  # Phase 1 validation suite (6 tests)
-├── notebooks/
-│   └── exploratory_analysis.ipynb
+│   └── run_evaluation.py         # Standalone evaluation with reporting
 ├── requirements.txt
-├── Dockerfile
-├── CONTEXT.md                    # Full technical specification
 └── README.md                     # This file
 ```
 
@@ -208,22 +185,6 @@ Applied with 30% probability per video:
 - **GPU**: 24GB VRAM minimum (NVIDIA A100 or RTX 4090)
 - **CPU**: 16+ cores recommended
 - **Storage**: 500GB+ for preprocessed HDF5 datasets
-
-## Running Tests
-
-```bash
-# Phase 1 data pipeline tests
-python tests/test1.py
-
-# Preprocessing unit tests
-python data/preprocessing.py
-
-# Augmentation unit tests
-python data/augmentation.py
-
-# Full end-to-end smoke test
-python scripts/smoke_test.py
-```
 
 ## Switching from Dummy to Real Data
 

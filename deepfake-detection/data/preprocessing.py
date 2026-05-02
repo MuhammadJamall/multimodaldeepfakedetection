@@ -24,9 +24,15 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 import torch
-import torchaudio
+import librosa
 from PIL import Image
-from torchvision import transforms
+
+try:
+    import torchaudio
+except (ImportError, OSError):
+    # OSError happens on Windows when torchaudio binary is installed but
+    # incompatible with the local torch/CPU runtime.
+    torchaudio = None
 
 try:
     from facenet_pytorch import MTCNN
@@ -259,14 +265,12 @@ def create_6channel_tensor(
     Returns:
         (6, 224, 224) float32 tensor, values in [0, 1].
     """
-    to_tensor = transforms.ToTensor()  # Converts (H,W,C) uint8 → (C,H,W) float [0,1]
-
-    # Convert BGR → RGB before ToTensor
+    # Convert BGR → RGB and normalize to [0, 1] without torchvision.
     face_rgb = cv2.cvtColor(full_face, cv2.COLOR_BGR2RGB)
     mouth_rgb = cv2.cvtColor(mouth, cv2.COLOR_BGR2RGB)
 
-    face_t = to_tensor(face_rgb)    # (3, 224, 224)
-    mouth_t = to_tensor(mouth_rgb)  # (3, 224, 224)
+    face_t = torch.from_numpy(face_rgb.astype(np.float32) / 255.0).permute(2, 0, 1)
+    mouth_t = torch.from_numpy(mouth_rgb.astype(np.float32) / 255.0).permute(2, 0, 1)
 
     return torch.cat([face_t, mouth_t], dim=0)  # (6, 224, 224)
 
@@ -290,18 +294,25 @@ def extract_audio(
     Returns:
         Waveform tensor of shape (1, num_samples).
     """
-    waveform, orig_sr = torchaudio.load(video_path)
+    if torchaudio is not None:
+        waveform, orig_sr = torchaudio.load(video_path)
 
-    # Convert stereo to mono if needed
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
+        # Convert stereo to mono if needed
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
 
-    # Resample if necessary
-    if orig_sr != sample_rate:
-        resampler = torchaudio.transforms.Resample(orig_sr, sample_rate)
-        waveform = resampler(waveform)
+        # Resample if necessary
+        if orig_sr != sample_rate:
+            resampler = torchaudio.transforms.Resample(orig_sr, sample_rate)
+            waveform = resampler(waveform)
 
-    return waveform  # (1, num_samples)
+        return waveform  # (1, num_samples)
+
+    # Fallback when torchaudio is unavailable: use librosa + torch tensor.
+    audio, orig_sr = librosa.load(video_path, sr=sample_rate, mono=True)
+    if orig_sr != sample_rate and audio.size > 0:
+        audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=sample_rate)
+    return torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0)
 
 
 # ── Mel Spectrogram Windowed to Match Visual Frames ──────────────────────────
@@ -334,19 +345,34 @@ def compute_mel_windows(
     hop_length = int(sample_rate * hop_ms / 1000)    # 160 samples
     win_length = int(sample_rate * win_ms / 1000)    # 400 samples
 
-    # Compute full Mel spectrogram
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sample_rate,
-        n_mels=n_mels,
-        hop_length=hop_length,
-        win_length=win_length,
-        n_fft=max(win_length, 512),
-    )
-    mel_spec = mel_transform(waveform)  # (1, n_mels, total_time_frames)
+    if torchaudio is not None:
+        # Compute full Mel spectrogram with torchaudio when available.
+        mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_mels=n_mels,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_fft=max(win_length, 512),
+        )
+        mel_spec = mel_transform(waveform)  # (1, n_mels, total_time_frames)
 
-    # Convert to log scale
-    log_mel = torchaudio.transforms.AmplitudeToDB()(mel_spec)
-    log_mel = log_mel.squeeze(0)  # (n_mels, total_time_frames)
+        # Convert to log scale
+        log_mel = torchaudio.transforms.AmplitudeToDB()(mel_spec)
+        log_mel = log_mel.squeeze(0)  # (n_mels, total_time_frames)
+    else:
+        # librosa fallback for environments without torchaudio.
+        waveform_np = waveform.detach().cpu().numpy().squeeze(0)
+        mel_spec = librosa.feature.melspectrogram(
+            y=waveform_np,
+            sr=sample_rate,
+            n_mels=n_mels,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_fft=max(win_length, 512),
+            power=2.0,
+        )
+        log_mel = librosa.power_to_db(mel_spec, ref=np.max)
+        log_mel = torch.from_numpy(log_mel.astype(np.float32))
 
     total_time_frames = log_mel.shape[1]
 

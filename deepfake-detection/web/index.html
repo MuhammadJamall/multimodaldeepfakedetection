@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepDetect — AI-Powered Deepfake Detection</title>
+    <meta name="description" content="Upload an image or video to run AI-powered deepfake analysis using multimodal cross-attention audio-visual fusion.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+
+    <!-- ── Navbar ──────────────────────────────────────────────────────── -->
+    <nav id="navbar">
+        <div class="nav-inner">
+            <a href="#" class="nav-logo" id="nav-logo">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    <path d="M9 12l2 2 4-4"/>
+                </svg>
+                <span>DeepDetect</span>
+            </a>
+            <div class="nav-links" id="nav-links">
+                <a href="#hero" class="nav-link">Home</a>
+                <a href="#about" class="nav-link">About</a>
+                <a href="#how-it-works" class="nav-link">How It Works</a>
+            </div>
+            <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+        </div>
+    </nav>
+
+    <!-- ── Hero / Upload Section ───────────────────────────────────────── -->
+    <main>
+        <section id="hero" class="section hero-section">
+            <div class="container">
+                <h1 id="hero-heading">Is this media real?</h1>
+                <p class="hero-subtitle">Upload an image or video to run an AI-powered deepfake analysis.</p>
+
+                <!-- Upload Area -->
+                <div class="upload-card" id="upload-card">
+                    <div class="upload-zone" id="upload-zone">
+                        <svg class="upload-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M24 32V12"/>
+                            <path d="M16 20l8-8 8 8"/>
+                            <path d="M40 32v6a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2v-6"/>
+                        </svg>
+                        <p class="upload-text">Drag & Drop image or video here</p>
+                        <p class="upload-subtext">or click to select file</p>
+                        <p class="upload-formats">JPG · PNG · MP4</p>
+                        <input type="file" id="file-input" accept="image/jpeg,image/png,video/mp4" hidden>
+                    </div>
+
+                    <!-- File Preview (shown after selection) -->
+                    <div class="file-preview" id="file-preview" style="display:none;">
+                        <div class="preview-info">
+                            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                <polyline points="14,2 14,8 20,8"/>
+                            </svg>
+                            <div class="preview-details">
+                                <span class="preview-name" id="preview-name">filename.jpg</span>
+                                <span class="preview-size" id="preview-size">2.4 MB</span>
+                            </div>
+                            <button class="preview-remove" id="preview-remove" aria-label="Remove file">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button class="btn-analyze" id="btn-analyze" disabled>Run Analysis</button>
+                </div>
+
+                <!-- Result Card -->
+                <div class="result-card" id="result-card" style="display:none;">
+                    <div class="result-grid">
+                        <div class="result-preview" id="result-preview-container">
+                            <img id="result-image" src="" alt="Analyzed media" style="display:none;">
+                            <video id="result-video" src="" muted loop style="display:none;"></video>
+                        </div>
+                        <div class="result-details">
+                            <span class="result-label">Verdict</span>
+                            <h2 class="result-verdict" id="result-verdict">FAKE</h2>
+                            <div class="confidence-block">
+                                <div class="confidence-header">
+                                    <span class="confidence-label">Confidence</span>
+                                    <span class="confidence-value" id="confidence-value">94.2%</span>
+                                </div>
+                                <div class="confidence-bar">
+                                    <div class="confidence-fill" id="confidence-fill" style="width:0%"></div>
+                                </div>
+                            </div>
+                            <p class="result-note" id="result-note">
+                                Cross-modal audio-visual inconsistencies detected between lip movements and speech patterns.
+                            </p>
+                            <button class="btn-another" id="btn-another">Analyze Another File</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div class="loading-card" id="loading-card" style="display:none;">
+                    <div class="loading-content">
+                        <div class="spinner"></div>
+                        <p class="loading-text">Analyzing media...</p>
+                        <p class="loading-subtext">Running multimodal cross-attention analysis</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── About Section ───────────────────────────────────────────── -->
+        <section id="about" class="section about-section">
+            <div class="container">
+                <h2 class="section-heading">About DeepDetect</h2>
+                <div class="about-grid">
+                    <div class="about-text">
+                        <p>DeepDetect uses a <strong>multimodal cross-attention architecture</strong> that jointly analyzes visual and audio streams to identify deepfake manipulations.</p>
+                        <p>Unlike single-modality detectors, our system exploits the fact that deepfake audio and video are generated independently — leaving subtle cross-modal desynchronization artifacts that are invisible to the human eye but detectable by our model.</p>
+                    </div>
+                    <div class="about-stats">
+                        <div class="stat-item">
+                            <span class="stat-value">96.2M</span>
+                            <span class="stat-label">Parameters</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-value">≥93%</span>
+                            <span class="stat-label">AUROC Target</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-value">&lt;8%</span>
+                            <span class="stat-label">Equal Error Rate</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── How It Works ────────────────────────────────────────────── -->
+        <section id="how-it-works" class="section steps-section">
+            <div class="container">
+                <h2 class="section-heading">How It Works</h2>
+                <div class="steps-grid">
+                    <div class="step-card">
+                        <span class="step-number">1</span>
+                        <svg class="step-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17,8 12,3 7,8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                        <h3 class="step-title">Upload</h3>
+                        <p class="step-desc">Upload a video or image file. Our system extracts 16 frames and the audio track for analysis.</p>
+                    </div>
+                    <div class="step-card">
+                        <span class="step-number">2</span>
+                        <svg class="step-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                            <line x1="8" y1="21" x2="16" y2="21"/>
+                            <line x1="12" y1="17" x2="12" y2="21"/>
+                            <path d="M6 8h.01M6 12h.01M10 8h4M10 12h4"/>
+                        </svg>
+                        <h3 class="step-title">Analyze</h3>
+                        <p class="step-desc">ViT-B/16 and CNN-6 encode visual and audio features. Cross-attention fusion detects desynchronization.</p>
+                    </div>
+                    <div class="step-card">
+                        <span class="step-number">3</span>
+                        <svg class="step-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22,4 12,14.01 9,11.01"/>
+                        </svg>
+                        <h3 class="step-title">Result</h3>
+                        <p class="step-desc">Get a clear verdict — Real or Fake — with a confidence score and forensic analysis notes.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ── Footer ──────────────────────────────────────────────────────── -->
+    <footer id="footer">
+        <div class="container footer-inner">
+            <p class="footer-text">DeepDetect — Multimodal Deepfake Detection</p>
+            <p class="footer-credit">IBIT, University of the Punjab, Lahore · 2026</p>
+        </div>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>

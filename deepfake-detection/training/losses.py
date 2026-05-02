@@ -120,7 +120,7 @@ def lse_d_loss(v_emb: torch.Tensor, a_emb: torch.Tensor,
 
     if len(parts) == 0:
         return v_emb.new_tensor(0.0)
-    return sum(parts) / len(parts)
+    return torch.tensor(sum(parts) / len(parts))
 
 
 def combined_loss(
