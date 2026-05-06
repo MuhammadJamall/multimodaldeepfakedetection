@@ -64,7 +64,16 @@ def load_model(checkpoint_path=None):
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"[Server] Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        # Remap old checkpoint keys (fusion.v_to_a.* → fusion.layers.0.v_to_a.*)
+        state = ckpt["model"]
+        remapped = {}
+        for k, v in state.items():
+            if k.startswith("fusion.") and not k.startswith("fusion.layers."):
+                new_key = k.replace("fusion.", "fusion.layers.0.", 1)
+                remapped[new_key] = v
+            else:
+                remapped[k] = v
+        model.load_state_dict(remapped)
         epoch = ckpt.get("epoch", "?")
         metrics = ckpt.get("metrics", {})
         print(f"[Server] ✅ Loaded trained model from epoch {epoch}")

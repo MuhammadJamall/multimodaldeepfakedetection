@@ -15,7 +15,9 @@ Implements:
 Usage:
     python training/train.py --config configs/default.yaml
 """
-
+import torch
+print("cuda available:", torch.cuda.is_available())
+print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
 import os
 import sys
 import argparse
@@ -87,6 +89,7 @@ def train_epoch(
     device:    torch.device,
     grad_clip: float,
     epoch:     int,
+    warmup_epochs: int,
 ) -> dict:
     """
     Run one training epoch.
@@ -96,7 +99,7 @@ def train_epoch(
     model.train()
     # CRITICAL: if backbones are frozen, keep them in eval() mode
     # to avoid corrupting BatchNorm running statistics.
-    if epoch <= 5:
+    if epoch <= warmup_epochs:
         model.visual_encoder.vit.eval()
         for m in [model.audio_encoder.conv1, model.audio_encoder.conv2,
                   model.audio_encoder.conv3, model.audio_encoder.conv4,
@@ -212,11 +215,13 @@ def train(cfg: dict):
 
     # ── W&B init ───────────────────────────────────────────────────────────
     log_cfg = cfg.get("logging", {})
-    wandb.init(
-        project=log_cfg.get("wandb_project", "deepfake-detection"),
-        config=cfg,
-        name=cfg.get("run_name", f"run_{int(time.time())}"),
-    )
+    use_wandb = bool(log_cfg.get("use_wandb", True))
+    if use_wandb:
+        wandb.init(
+            project=log_cfg.get("wandb_project", "deepfake-detection"),
+            config=cfg,
+            name=cfg.get("run_name", f"run_{int(time.time())}"),
+        )
 
     # ── Model ──────────────────────────────────────────────────────────────
     mcfg = cfg["model"]
@@ -268,7 +273,8 @@ def train(cfg: dict):
 
     # ── Training loop ──────────────────────────────────────────────────────
     best_auroc   = 0.0
-    ckpt_dir     = cfg.get("checkpoint_dir", "checkpoints")
+    paths_cfg = cfg.get("paths", {})
+    ckpt_dir = cfg.get("checkpoint_dir") or paths_cfg.get("checkpoint_dir") or "checkpoints"
 
     for epoch in range(1, tcfg["epochs"] + 1):
         t0 = time.time()
@@ -281,7 +287,7 @@ def train(cfg: dict):
         # ── Train + validate ───────────────────────────────────────────────
         train_metrics = train_epoch(
             model, train_loader, optimizer, criterion,
-            device, tcfg["gradient_clip"], epoch,
+            device, tcfg["gradient_clip"], epoch, tcfg["warmup_epochs"],
         )
         val_metrics = val_epoch(model, val_loader, criterion, device)
 
@@ -294,7 +300,8 @@ def train(cfg: dict):
                       "epoch_time_s": epoch_time,
                       "lr/backbone": optimizer.param_groups[0]["lr"],
                       "lr/fusion":   optimizer.param_groups[-1]["lr"]}
-        wandb.log(log_dict)
+        if use_wandb:
+            wandb.log(log_dict)
 
         auroc = val_metrics["val/auroc"]
         acc   = val_metrics["val/accuracy"]
@@ -323,7 +330,8 @@ def train(cfg: dict):
         )
 
     print(f"\nTraining complete. Best val AUROC: {best_auroc:.4f}")
-    wandb.finish()
+    if use_wandb:
+        wandb.finish()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -10,50 +10,49 @@ Computes:
   v' = Attn(Q=v, K=a, V=a)   — visual attends to audio
   a' = Attn(Q=a, K=v, V=v)   — audio  attends to visual
 
-Outputs: concatenation of mean-pooled v' and a' → (B, 1024)
-         which feeds directly into the classifier head.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
+
+# Check if PyTorch 2.0+ scaled_dot_product_attention is available
+_SDPA_AVAILABLE = hasattr(F, "scaled_dot_product_attention")
 
 
 class MultiHeadCrossAttention(nn.Module):
     """
-    Standard scaled dot-product multi-head cross-attention.
+    Multi-head cross-attention: Query from X, Key/Value from Y.
 
-    Query comes from stream X; Key and Value from stream Y.
-    Attn(X→Y) = softmax( (Q_X · K_Y^T) / √d_k ) · V_Y
+    Attn(X→Y) = softmax( QK^T / √d_k ) V
+    Output    = LayerNorm( X + Proj(attention_output) )
 
-    Then: output = LayerNorm( X + linear_proj(attention_output) )
+    Uses F.scaled_dot_product_attention (FlashAttention) on PyTorch 2.0+
+    for faster and more memory-efficient computation.
     """
 
     def __init__(self, embed_dim: int = 512, num_heads: int = 8,
-                 dropout: float = 0.0):
-        """
-        Args:
-            embed_dim : Dimensionality of input embeddings (512).
-            num_heads : Number of attention heads (8).
-            dropout   : Dropout on attention weights (0 by default).
-        """
+                 dropout: float = 0.1):
         super().__init__()
-        assert embed_dim % num_heads == 0, \
-            f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
+            )
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.head_dim  = embed_dim // num_heads   # 64
+        self.head_dim  = embed_dim // num_heads
         self.scale     = math.sqrt(self.head_dim)
+        self.dropout   = dropout
 
-        # Projections for Query (from X), Key and Value (from Y)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.q_proj   = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj   = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.v_proj   = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
-        self.attn_drop = nn.Dropout(dropout)
+        self.attn_drop  = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -63,99 +62,165 @@ class MultiHeadCrossAttention(nn.Module):
             y : Key/Value src (B, T, embed_dim)
 
         Returns:
-            out : (B, T, embed_dim)  — x enriched with information from y
+            out : (B, T, embed_dim) — x enriched with info from y
         """
         B, T, D = x.shape
 
-        # ── Linear projections ────────────────────────────────────────────────
-        Q = self.q_proj(x)   # (B, T, D)
-        K = self.k_proj(y)   # (B, T, D)
-        V = self.v_proj(y)   # (B, T, D)
+        Q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(y).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(y).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # ── Split into heads: (B, T, D) → (B, num_heads, T, head_dim) ─────────
-        Q = Q.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        K = K.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
-        V = V.view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        if _SDPA_AVAILABLE:
+            # PyTorch 2.0+ — uses FlashAttention kernel when on CUDA
+            # faster and O(N) memory vs O(N²) for standard attention
+            attn_output = F.scaled_dot_product_attention(
+                Q, K, V,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
+        else:
+            # Fallback: manual scaled dot-product attention
+            attn_scores  = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_weights = self.attn_drop(attn_weights)
+            attn_output  = torch.matmul(attn_weights, V)
 
-        # ── Scaled dot-product attention ──────────────────────────────────────
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale  # (B, H, T, T)
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        attn_weights = self.attn_drop(attn_weights)
+        # Merge heads: (B, H, T, d) → (B, T, D)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(B, T, D)
 
-        attn_output = torch.matmul(attn_weights, V)       # (B, H, T, head_dim)
+        # Residual + LayerNorm
+        return self.layer_norm(x + self.out_proj(attn_output))
 
-        # ── Merge heads ───────────────────────────────────────────────────────
-        attn_output = attn_output.transpose(1, 2).contiguous()  # (B, T, H, head_dim)
-        attn_output = attn_output.view(B, T, D)                 # (B, T, D)
 
-        # ── Output projection + residual + LayerNorm ──────────────────────────
-        out = self.layer_norm(x + self.out_proj(attn_output))   # (B, T, D)
+class FeedForward(nn.Module):
+    """
+    Position-wise FFN: Linear → GELU → Dropout → Linear → residual + LN.
+    Standard Transformer FFN, added to improve representation after attention.
+    """
 
-        return out
+    def __init__(self, embed_dim: int = 512, ffn_dim: int = 2048,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, ffn_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ffn_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+        self.layer_norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layer_norm(x + self.net(x))
+
+
+class CrossAttentionLayer(nn.Module):
+    """One full cross-attention layer: cross-attn + FFN for both streams."""
+
+    def __init__(self, embed_dim: int = 512, num_heads: int = 8,
+                 ffn_dim: int = 2048, dropout: float = 0.1):
+        super().__init__()
+        self.v_to_a = MultiHeadCrossAttention(embed_dim, num_heads, dropout)
+        self.a_to_v = MultiHeadCrossAttention(embed_dim, num_heads, dropout)
+        self.ffn_v  = FeedForward(embed_dim, ffn_dim, dropout)
+        self.ffn_a  = FeedForward(embed_dim, ffn_dim, dropout)
+
+    def forward(self, v: torch.Tensor,
+                a: torch.Tensor):
+        v_out = self.ffn_v(self.v_to_a(x=v, y=a))
+        a_out = self.ffn_a(self.a_to_v(x=a, y=v))
+        return v_out, a_out
 
 
 class CrossAttentionFusion(nn.Module):
     """
-    Full bidirectional cross-attention fusion module.
+    Full bidirectional cross-attention fusion with N stacked layers.
 
-    v' = CrossAttn(Q=v, K=a, V=a)   [visual attends to audio]
-    a' = CrossAttn(Q=a, K=v, V=v)   [audio  attends to visual]
+    v' = CrossAttn(Q=v, K=a, V=a) + FFN   [visual attends to audio]
+    a' = CrossAttn(Q=a, K=v, V=v) + FFN   [audio  attends to visual]
 
-    Both streams are mean-pooled over the time dimension T,
-    then concatenated → (B, 1024) for the classifier head.
+    Both streams are mean-pooled over T, then concatenated → (B, 2*embed_dim)
+    for the classifier head.
 
-    Design choice: single attention layer (no stacking) to avoid
-    overfitting on the relatively small FakeAVCeleb dataset.
+    num_layers=1 (default) matches original design and avoids overfitting
+    on small datasets like FakeAVCeleb. Increase to 2 for larger datasets.
     """
 
     def __init__(self, embed_dim: int = 512, num_heads: int = 8,
-                 dropout: float = 0.0):
-        super().__init__()
-
-        # Visual attends to audio
-        self.v_to_a = MultiHeadCrossAttention(embed_dim, num_heads, dropout)
-        # Audio attends to visual
-        self.a_to_v = MultiHeadCrossAttention(embed_dim, num_heads, dropout)
-
-    def forward(self, v: torch.Tensor,
-                a: torch.Tensor) -> torch.Tensor:
+                 dropout: float = 0.1, num_layers: int = 1,
+                 ffn_dim: int = 2048):
         """
         Args:
-            v : Visual embeddings (B, T, 512)
-            a : Audio  embeddings (B, T, 512)
+            embed_dim  : Embedding dimension for both streams (512).
+            num_heads  : Attention heads (8).
+            dropout    : Dropout on attention weights and FFN (0.1).
+                         FIX: v1 hardcoded 0.0 regardless of this argument.
+            num_layers : Number of stacked cross-attention layers (default 1).
+            ffn_dim    : FFN hidden dimension (default 2048 = 4×embed_dim).
+        """
+        super().__init__()
+        self.layers = nn.ModuleList([
+            CrossAttentionLayer(embed_dim, num_heads, ffn_dim, dropout)
+            for _ in range(num_layers)
+        ])
+        self.out_dim = embed_dim * 2   # for classifier head sizing
+
+    def forward(self, v: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            v : Visual embeddings (B, T, embed_dim)
+            a : Audio  embeddings (B, T, embed_dim)
 
         Returns:
-            fused : (B, 1024)  — concatenation of mean-pooled attended streams
+            fused : (B, 2*embed_dim)
         """
-        # Bidirectional cross-attention
-        v_prime = self.v_to_a(x=v, y=a)   # (B, T, 512)
-        a_prime = self.a_to_v(x=a, y=v)   # (B, T, 512)
+        if v.shape != a.shape:
+            raise ValueError(
+                f"Visual and audio embeddings must have the same shape. "
+                f"Got v={v.shape}, a={a.shape}"
+            )
 
-        # Temporal mean-pooling (collapses T dimension)
-        v_pooled = v_prime.mean(dim=1)     # (B, 512)
-        a_pooled = a_prime.mean(dim=1)     # (B, 512)
+        for layer in self.layers:
+            v, a = layer(v, a)
 
-        # Concatenate both streams
-        fused = torch.cat([v_pooled, a_pooled], dim=-1)  # (B, 1024)
-
-        return fused
+        v_pooled = v.mean(dim=1)               # (B, embed_dim)
+        a_pooled = a.mean(dim=1)               # (B, embed_dim)
+        return torch.cat([v_pooled, a_pooled], dim=-1)   # (B, 2*embed_dim)
 
 
 # ── Smoke test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("Testing CrossAttentionFusion…")
-    fusion = CrossAttentionFusion(embed_dim=512, num_heads=8)
+    print(f"  FlashAttention (SDPA) available: {_SDPA_AVAILABLE}")
+
+    fusion = CrossAttentionFusion(
+        embed_dim=512, num_heads=8, dropout=0.1, num_layers=1
+    )
     fusion.eval()
 
-    v_dummy = torch.randn(2, 16, 512)   # B=2, T=16
+    v_dummy = torch.randn(2, 16, 512)
     a_dummy = torch.randn(2, 16, 512)
 
     with torch.no_grad():
         out = fusion(v_dummy, a_dummy)
 
-    print(f"Visual input shape : {v_dummy.shape}")
-    print(f"Audio  input shape : {a_dummy.shape}")
-    print(f"Fused  output shape: {out.shape}")    # Expected: (2, 1024)
-    assert out.shape == (2, 1024), "Shape mismatch!"
+    assert out.shape == (2, 1024), f"Shape mismatch: {out.shape}"
+    print(f"Visual input : {v_dummy.shape}")
+    print(f"Audio  input : {a_dummy.shape}")
+    print(f"Fused  output: {out.shape}")
+
+    # Test shape mismatch raises properly
+    try:
+        fusion(torch.randn(2, 16, 512), torch.randn(2, 8, 512))
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as e:
+        print(f"ValueError raised correctly ✅")
+
+    # Test 2-layer version
+    fusion2 = CrossAttentionFusion(num_layers=2)
+    with torch.no_grad():
+        out2 = fusion2(v_dummy, a_dummy)
+    assert out2.shape == (2, 1024)
+    print(f"2-layer fusion: {out2.shape} ✅")
+
     print("✅  CrossAttentionFusion smoke test passed.")

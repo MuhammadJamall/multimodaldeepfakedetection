@@ -1,8 +1,8 @@
-# Multimodal Deepfake Detection Using Cross-Attention Audio-Visual Fusion
+# DeepDetect — Multimodal Deepfake Detection
 
 Binary authenticity classification (real/fake) of talking-face video clips using joint audio-visual modeling with bidirectional cross-attention fusion.
 
-> **Core Innovation**: Audio and video in deepfakes are generated independently, leaving cross-modal desynchronization. This model exploits these inconsistencies using a dual-stream architecture (ViT-B/16 + CNN-6) with bidirectional cross-attention fusion.
+> **Core Innovation**: Audio and video in deepfakes are generated independently, leaving cross-modal desynchronization. This model exploits these inconsistencies using a dual-stream architecture (ViT-B/16 + CNN-6) with bidirectional cross-attention fusion and LSE-D loss.
 
 ## Architecture
 
@@ -25,6 +25,14 @@ Video Frames (B, 16, 6, 224, 224)     Mel Spectrogram (B, 16, 80, F)
                    Probability ∈ [0, 1]
 ```
 
+## Results
+
+| Dataset | AUROC | Val Accuracy | Training |
+|---------|-------|-------------|----------|
+| DFDC (2,202 videos) | **0.8149** | 58.97% | 20 epochs on Colab T4 |
+
+> **Note**: Accuracy appears low because AUROC is the primary metric for imbalanced datasets (82% fake / 18% real). The model discriminates well — it just needs threshold tuning per deployment.
+
 ## Quick Start
 
 ### 1. Environment Setup
@@ -33,8 +41,14 @@ Video Frames (B, 16, 6, 224, 224)     Mel Spectrogram (B, 16, 80, F)
 pip install -r requirements.txt
 ```
 
-### 2. Preprocess FakeAVCeleb Dataset
+### 2. Preprocess Dataset
 
+**DFDC Dataset:**
+```bash
+python scripts/preprocess_dfdc.py
+```
+
+**FakeAVCeleb Dataset:**
 ```bash
 python scripts/preprocess_to_hdf5.py \
     --data-dir /path/to/FakeAVCeleb \
@@ -42,55 +56,46 @@ python scripts/preprocess_to_hdf5.py \
     --num-frames 16
 ```
 
-Expected directory structure for FakeAVCeleb:
-```
-FakeAVCeleb/
-├── RealVideo/
-│   └── *.mp4
-└── FakeVideo/
-    ├── FaceSwap/
-    │   └── *.mp4
-    ├── Wav2Lip/
-    │   └── *.mp4
-    └── .../
-```
+### 3. Train
 
-### 3. Configure for Real Data
+**Option A — Google Colab (recommended for free GPU):**
 
-Edit `configs/default.yaml`:
+Open `notebooks/ModelTraining.ipynb` on [Google Colab](https://colab.research.google.com/).
 
-```yaml
-data:
-  use_dummy_data: false
-  hdf5_path: "./data/preprocessed/fakeavceleb.h5"
-```
+Features:
+- Auto-resume from checkpoints on Google Drive
+- Mixed precision (AMP) for T4 GPU
+- Time guard for free-tier session limits
+- Gradient accumulation (effective batch size = 8)
 
-### 4. Train
-
+**Option B — Local GPU:**
 ```bash
 python training/train.py --config configs/default.yaml
 ```
 
-Training runs for 30 epochs with:
+Training runs with:
 - **Phase 1 (Epochs 1–5)**: Backbones frozen, only fusion + classifier train
-- **Phase 2 (Epochs 6–30)**: All layers fine-tuned with differential learning rates
+- **Phase 2 (Epochs 6+)**: All layers fine-tuned with differential learning rates
 - Checkpoints saved to `checkpoints/` (best AUROC + latest)
-- Metrics logged to Weights & Biases
 
-### 5. Evaluate
+### 4. Evaluate
 
 ```bash
-# In-distribution evaluation
-python scripts/run_evaluation.py \
-    --checkpoint checkpoints/best_auroc.pt \
-    --per-method
-
-# Cross-dataset (DFDC zero-shot)
 python scripts/run_evaluation.py \
     --checkpoint checkpoints/best_auroc.pt \
     --hdf5-path data/preprocessed/dfdc.h5 \
-    --dataset-name DFDC
+    --split test \
+    --dataset-name DFDC \
+    --per-method
 ```
+
+### 5. Web Interface
+
+```bash
+python web/server.py --checkpoint checkpoints/best_auroc.pt
+```
+
+Open `http://localhost:5000` — upload any video for real-time deepfake detection with forensic analysis.
 
 ## Project Structure
 
@@ -101,13 +106,13 @@ deepfake-detection/
 ├── data/
 │   ├── preprocessing.py          # MTCNN face extraction, Mel spectrograms
 │   ├── augmentation.py           # JPEG, blur, frame-drop, audio noise
-│   ├── dataset.py                # PyTorch Dataset (dummy + HDF5)
+│   ├── dataset.py                # PyTorch Dataset + WeightedRandomSampler
 │   └── dummy_dataset.py          # Synthetic data for testing
 ├── models/
-│   ├── visual_encoder.py         # ViT-B/16 (6-channel input)
+│   ├── visual_encoder.py         # ViT-B/16 (6-channel dual-stream input)
 │   ├── audio_encoder.py          # CNN-6 for Mel spectrograms
 │   ├── cross_attention.py        # Bidirectional cross-attention fusion
-│   └── detector.py               # Top-level model
+│   └── detector.py               # Top-level model orchestrator
 ├── training/
 │   ├── train.py                  # Training loop (phased warmup + finetune)
 │   ├── losses.py                 # BCE + LSE-D combined loss
@@ -117,22 +122,28 @@ deepfake-detection/
 │   └── interpretability.py       # Cross-attention heatmap extraction
 ├── scripts/
 │   ├── preprocess_to_hdf5.py     # FakeAVCeleb → HDF5 offline processing
+│   ├── preprocess_dfdc.py        # DFDC → HDF5 offline processing
 │   └── run_evaluation.py         # Standalone evaluation with reporting
+├── notebooks/
+│   └── ModelTraining.ipynb       # Google Colab training notebook
+├── web/
+│   ├── server.py                 # Flask backend for inference
+│   ├── index.html                # Frontend UI
+│   ├── styles.css                # Styling
+│   └── script.js                 # Frontend logic
 ├── requirements.txt
-└── README.md                     # This file
+└── README.md
 ```
 
 ## Training Configuration
 
-All hyperparameters in `configs/default.yaml`:
-
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| Epochs | 30 | Total training epochs |
-| Batch size | 32 | Per-GPU batch size |
+| Epochs | 20 | Total training epochs |
+| Batch size | 4 | Per-GPU batch size (×2 accumulation = effective 8) |
 | LR (backbone) | 1e-4 | ViT + CNN-6 learning rate |
 | LR (fusion) | 1e-3 | Fusion + classifier learning rate |
-| Warmup | 5 epochs | Linear LR warmup |
+| Warmup | 5 epochs | Backbone frozen phase |
 | Weight decay | 1e-2 | AdamW regularization |
 | Gradient clip | 1.0 | Max gradient norm |
 | λ (LSE-D) | 0.3 | LSE-D loss weight |
@@ -146,30 +157,27 @@ L_total = L_BCE + λ · L_LSE-D
 
 L_BCE = -[y·log(ŷ) + (1-y)·log(1-ŷ)]
 
-L_LSE-D:
-  Real (y=0): ||v - a||₂           (minimize sync distance)
-  Fake (y=1): max(0, m - ||v - a||₂)  (push modalities apart)
+L_LSE-D (Lip-Sync Error Distance):
+  Real (y=0): ||v - a||₂             → minimize sync distance
+  Fake (y=1): max(0, m - ||v - a||₂) → push modalities apart
 ```
 
-## Target Metrics
+## Class Imbalance Handling
 
-| Metric | Target | Protocol |
-|--------|--------|----------|
-| AUROC (in-distribution) | ≥ 0.93 | FakeAVCeleb test (3,000 videos) |
-| Accuracy | ≥ 88% | Threshold at 0.5 |
-| EER | < 8% | Equal Error Rate |
-| AUROC (cross-dataset) | < 5% drop | DFDC zero-shot (10,000 videos) |
+The DFDC dataset has a 4.7:1 fake-to-real ratio. Handled via:
+- **WeightedRandomSampler**: Ensures each batch sees ~50/50 real/fake samples
+- **Stratified splitting**: Train/val/test maintain the same class ratio
 
 ## Preprocessing Pipeline
 
 Each video is processed offline into HDF5:
 
-1. **Frame extraction**: 16 uniformly sampled frames from video
-2. **Face detection**: MTCNN with fallback (last bbox → center crop)
-3. **Dual crops**: Full-face (224×224) + mouth region (96×96 → 224×224)
-4. **Channel stacking**: 6-channel tensor (face RGB + mouth RGB)
-5. **Audio extraction**: Resampled to 16kHz, mono
-6. **Mel spectrogram**: 80-band, windowed to T=16 matching visual frames
+1. **Frame extraction** — 16 uniformly sampled frames from video
+2. **Face detection** — MTCNN with fallback (last bbox → center crop)
+3. **Dual crops** — Full-face (224×224) + mouth region (96×96 → 224×224)
+4. **Channel stacking** — 6-channel tensor (face RGB + mouth RGB)
+5. **Audio extraction** — Resampled to 16kHz, mono
+6. **Mel spectrogram** — 80-band, windowed to T=16 matching visual frames
 
 ## Augmentation (Training Only)
 
@@ -178,30 +186,16 @@ Applied with 30% probability per video:
 - Gaussian blur (σ 0.5–2.0)
 - Temporal frame-dropping (20% per frame)
 - Audio Gaussian noise (σ = 0.01)
-- H.264 re-encoding (CRF 23–35)
 
-## Hardware Requirements
+## Hardware
 
-- **GPU**: 24GB VRAM minimum (NVIDIA A100 or RTX 4090)
-- **CPU**: 16+ cores recommended
-- **Storage**: 500GB+ for preprocessed HDF5 datasets
-
-## Switching from Dummy to Real Data
-
-The project ships with dummy data generators for development. To switch:
-
-1. Place FakeAVCeleb videos in a directory
-2. Run: `python scripts/preprocess_to_hdf5.py --data-dir /path/to/FakeAVCeleb`
-3. Edit `configs/default.yaml`:
-   ```yaml
-   data:
-     use_dummy_data: false
-     hdf5_path: "./data/preprocessed/fakeavceleb.h5"
-   ```
-4. Train: `python training/train.py`
+| Environment | GPU | Training Time |
+|-------------|-----|---------------|
+| Google Colab (free) | Tesla T4 16GB | ~107 min / 20 epochs |
+| Local | Any CUDA GPU 8GB+ | Varies |
 
 ## Team
 
-- Institution: IBIT, University of the Punjab, Lahore
-- Team size: 2 developers
-- Completion: April 2026
+- **Institution**: IBIT, University of the Punjab, Lahore
+- **Team size**: 2 developers
+- **Completion**: May 2026

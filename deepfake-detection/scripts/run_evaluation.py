@@ -31,7 +31,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -45,6 +45,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from models.detector import DeepfakeDetector
 from evaluation.evaluate import compute_metrics, compute_eer
 from data.dataset import BasicDataset
+from data.dummy_dataset import DummyDataset
 
 try:
     import h5py
@@ -71,7 +72,17 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple:
         dropout=mcfg.get("dropout", 0.3),
     ).to(device)
 
-    model.load_state_dict(ckpt["model"])
+    # Remap old checkpoint keys (fusion.v_to_a.* → fusion.layers.0.v_to_a.*)
+    state = ckpt["model"]
+    remapped = {}
+    for k, v in state.items():
+        if k.startswith("fusion.") and not k.startswith("fusion.layers."):
+            new_key = k.replace("fusion.", "fusion.layers.0.", 1)
+            remapped[new_key] = v
+        else:
+            remapped[k] = v
+
+    model.load_state_dict(remapped)
     model.eval()
 
     epoch = ckpt.get("epoch", "?")
@@ -156,7 +167,6 @@ def evaluate_per_method(
 
     # Get all predictions first
     dataset = BasicDataset(
-        use_dummy_data=False,
         hdf5_path=hdf5_path,
         split=split,
     )
@@ -206,9 +216,9 @@ def evaluate_per_method(
 
 def print_results(
     metrics: Dict,
-    method_metrics: Dict = None,
+    method_metrics: Optional[Dict] = None,
     dataset_name: str = "FakeAVCeleb",
-    targets: Dict = None,
+    targets: Optional[Dict] = None,
 ):
     """Pretty-print evaluation results with target comparisons."""
     if targets is None:
@@ -319,14 +329,9 @@ def main():
 
     # ── Build data loader ─────────────────────────────────────────────────
     if args.dummy:
-        dataset = BasicDataset(
-            num_samples=32,
-            use_dummy_data=True,
-            split=args.split,
-        )
+        dataset = DummyDataset()
     elif args.hdf5_path:
         dataset = BasicDataset(
-            use_dummy_data=False,
             hdf5_path=args.hdf5_path,
             split=args.split,
         )
@@ -335,17 +340,12 @@ def main():
         hdf5_path = dcfg.get("hdf5_path", None)
         if hdf5_path and os.path.exists(hdf5_path):
             dataset = BasicDataset(
-                use_dummy_data=False,
                 hdf5_path=hdf5_path,
                 split=args.split,
             )
         else:
             print("[WARNING] No HDF5 data found — falling back to dummy data")
-            dataset = BasicDataset(
-                num_samples=32,
-                use_dummy_data=True,
-                split=args.split,
-            )
+            dataset = DummyDataset()
 
     loader = DataLoader(
         dataset, batch_size=args.batch_size,
